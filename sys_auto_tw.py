@@ -6,6 +6,36 @@ import subprocess
 from datetime import datetime
 
 # =========================
+# LOGGING (NON-INTRUSIVE)
+# =========================
+CSV_FILE = "test_results.csv"
+TXT_FILE = "test_report.txt"
+
+def init_logs():
+    # CSV header
+    with open(CSV_FILE, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Timestamp", "Test", "Expected", "Observed", "Status"])
+
+    # TXT header
+    with open(TXT_FILE, "w") as f:
+        f.write("===== TEST REPORT =====\n\n")
+
+def log_csv(name, expected, observed, status):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(CSV_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([timestamp, name, expected, observed, status])
+
+def log_txt(name, expected, observed, status):
+    with open(TXT_FILE, "a") as f:
+        f.write(f"{name}\n")
+        f.write(f"Expected: {expected}\n")
+        f.write(f"Observed: {observed}\n")
+        f.write(f"Result: {status}\n")
+        f.write("----------------------------------------\n")
+
+# =========================
 # INPUT VALIDATION
 # =========================
 def is_valid_ip(ip):
@@ -73,6 +103,18 @@ def verify_fields(expected):
     return ok, str(res), lat
 
 # =========================
+# REBOOT LOG (NEW)
+# =========================
+def get_reboot_log():
+    res, lat = send_request({"passcode": PASSCODE_NEW, "command": "rebootLog"})
+    if not res:
+        return None, lat
+    try:
+        return int(res.get("rebootCount", -1)), lat
+    except:
+        return -1, lat
+
+# =========================
 # REBOOT DETECTION
 # =========================
 def wait_for_reboot(timeout=40):
@@ -102,27 +144,40 @@ def wait_product():
     return False, "No response"
 
 # =========================
-# CORE FLOW
+# CORE FLOW (UPDATED)
 # =========================
 def config_flow(payload, expected=None):
+    before_count, _ = get_reboot_log()
+
     _, config_lat = send_request(payload)
 
     rebooted, dt = wait_for_reboot()
     up, prod = wait_product()
+
+    after_count, _ = get_reboot_log()
+
+    reboot_ok = (
+        before_count is not None and
+        after_count is not None and
+        after_count > before_count
+    )
 
     if expected:
         ok, obs, verify_lat = verify_fields(expected)
     else:
         ok, obs, verify_lat = True, prod, 0
 
-    final = f"{obs} | reboot_dt={dt}s | config_lat={config_lat}ms | verify_lat={verify_lat}ms"
+    final = (
+        f"{obs} | reboot_dt={dt}s | "
+        f"rebootCount:{before_count}->{after_count} | "
+        f"config_lat={config_lat}ms | verify_lat={verify_lat}ms"
+    )
 
-    return rebooted and up and ok, final
+    return rebooted and up and ok and reboot_ok, final
 
 # =========================
 # TEST FUNCTIONS
 # =========================
-
 def set_passcode():
     return config_flow({"passcode": PASSCODE_NEW, "command": "config", "setPasscode": PASSCODE_NEW})
 
@@ -182,7 +237,7 @@ def set_product_name():
         {"productName": "Test_Device"}
     )
 
-# MQTT ops (no reboot expected)
+# MQTT ops
 def subscribe_topic():
     res, lat = send_request({"passcode": PASSCODE_NEW, "command": "subscribe",
                              "topic": f"{DEVICE_MAC}/status", "qos": "1"})
@@ -206,19 +261,191 @@ def get_will():
     return res is not None, f"lat={lat}ms"
 
 def configure_ping():
-    ok, obs = config_flow(
+    return config_flow(
         {"passcode": PASSCODE_NEW, "command": "config",
          "pingIPAddr1": DEVICE_IP,
          "pingIPAddr2": "8.8.8.8"}
     )
-    return ok, obs
 
 def reboot():
+    before_count, _ = get_reboot_log()
+
     _, lat = send_request({"passcode": PASSCODE_NEW, "command": "reboot"})
+
     rebooted, dt = wait_for_reboot()
     up, obs = wait_product()
-    return rebooted and up, f"{obs} | reboot_dt={dt}s | cmd_lat={lat}ms"
 
+    after_count, _ = get_reboot_log()
+
+    reboot_ok = (
+        before_count is not None and
+        after_count is not None and
+        after_count > before_count
+    )
+
+    return rebooted and up and reboot_ok, (
+        f"{obs} | reboot_dt={dt}s | "
+        f"rebootCount:{before_count}->{after_count} | cmd_lat={lat}ms"
+    )
+
+def ntp_settings():
+    res, _ = send_request({"passcode": PASSCODE_NEW, "command": "ntpSettings"})
+    return res is not None, str(res)
+
+def set_network_type():
+    return config_flow(
+        {"passcode": PASSCODE_NEW, "command": "config", "networkType": "1"},
+        {"networkType": "1"}
+    )
+
+def set_ota_secure():
+    return config_flow(
+        {"passcode": PASSCODE_NEW, "command": "config", "otaSecure": "1"},
+        {"otaSecure": "1"}
+    )
+
+def configure_network_settings():
+    return config_flow(
+        {"passcode": PASSCODE_NEW, "command": "config", "ipType": "0"},
+        {"ipType": "0"}
+    )
+def set_mqtt_alive():
+    return config_flow(
+        {"passcode": PASSCODE_NEW, "command": "config", "mqttSetAlive": "60"},
+        {"mqttSetAlive": "60"}
+    )
+
+def publish_topic():
+    res, lat = send_request({
+        "passcode": PASSCODE_NEW,
+        "command": "publish",
+        "topic": "test/topic",
+        "qos": "0"
+    })
+    return res is not None, f"lat={lat}ms"
+
+def get_publish():
+    res, lat = send_request({
+        "passcode": PASSCODE_NEW,
+        "command": "getPublish"
+    })
+    return res is not None, f"lat={lat}ms"
+def sensorscantime():
+    res, lat = send_request({
+        "passcode": PASSCODE_NEW,
+        "command": "sensorcscantime",
+        "value": "120"
+    })
+
+    if not res:
+        return False, "No response"
+
+    ok = res.get("command") == "badCommand"
+    return ok, str(res)
+def get_auth():
+    res, lat = send_request({"passcode": PASSCODE_NEW, "command": "getAuthPath"})
+    return res is not None, str(res)
+
+def set_auth():
+    return config_flow(
+        {
+            "passcode": PASSCODE_NEW,
+            "command": "setAuthPath",
+            "authPath": "https://ms.buildtrack.in/service/ota/v1/getFP/0/"
+        }
+    )
+
+def perform_auth():
+    res, lat = send_request({"passcode": PASSCODE_NEW, "command": "performAuth"})
+    return res is not None, f"lat={lat}ms"
+def get_board_detail():
+    res, lat = send_request({"passcode": PASSCODE_NEW, "command": "getBoardDetail"})
+    return res is not None, str(res)
+
+def get_maintenance():
+    res, lat = send_request({"passcode": PASSCODE_NEW, "command": "getMaintenanceMode"})
+    return res is not None, str(res)
+
+def set_maintenance():
+    return config_flow(
+        {"passcode": PASSCODE_NEW, "command": "setMaintenanceMode", "value": "1"}
+    )
+def set_uzid():
+    return config_flow(
+        {"passcode": PASSCODE_NEW, "command": "systemUzid", "value": DEVICE_MAC}
+    )
+def softap_enable():
+    res, _ = send_request({
+        "passcode": PASSCODE_NEW,
+        "command": "softap",
+        "value": "1"
+    })
+    if not res:
+        return False, "No response"
+
+    ans = input("👉 Is LED AQUA (SoftAP)? (y/n): ").lower()
+    return ans == "y", "User confirmed LED"
+
+def softap_disable():
+    res, _ = send_request({
+        "passcode": PASSCODE_NEW,
+        "command": "softap",
+        "value": "0"
+    })
+    if not res:
+        return False, "No response"
+
+    ans = input("👉 LED back to normal? (y/n): ").lower()
+    return ans == "y", "User confirmed LED"
+def touch_flow():
+    res, _ = send_request({"passcode": PASSCODE_NEW, "command": "product"})
+    if not res:
+        return False, "No product response"
+
+    if "Touch" not in res.get("type", ""):
+        return True, "Skipped (not touch device)"
+
+    ok1, _ = send_request({"passcode": PASSCODE_NEW, "command": "touchDelay", "delayTime": "50"})
+    ok2, _ = send_request({"passcode": PASSCODE_NEW, "command": "getEnableTouchPin"})
+    ok3, _ = send_request({
+        "passcode": PASSCODE_NEW,
+        "command": "enableTouchPin",
+        "params": ["1","1","1","1","1","1"]
+    })
+
+    return (ok1 and ok2 and ok3), "Touch flow executed"
+def network_reset():
+    res, lat = send_request({
+        "passcode": PASSCODE_NEW,
+        "command": "reset",
+        "value": "networkReset"
+    })
+    return res is not None, f"lat={lat}ms"
+
+def final_reset():
+    res, lat = send_request({
+        "passcode": PASSCODE_NEW,
+        "command": "reset",
+        "value": "hardReset"
+    })
+
+    if not res:
+        return False, "Reset command failed"
+
+    print("⏳ Waiting for device to reset...")
+    time.sleep(8)
+
+    # Check if device is still reachable
+    reachable = True
+    try:
+        requests.post(DEVICE_URL, timeout=3)
+    except:
+        reachable = False
+
+    if not reachable:
+        return True, "Device unreachable after hard reset (expected)"
+
+    return False, "Device still reachable → reset failed"
 # =========================
 # RUNNER
 # =========================
@@ -248,29 +475,77 @@ def run_test(name, func):
 # MAIN
 # =========================
 def run_all():
+    init_logs()
+
     tests = [
-        ("Passcode", set_passcode),
-        ("SRID", set_srid),
-        ("WiFi", configure_wifi),
-        ("SoftAP", configure_softap),
-        ("Server", set_server),
-        ("MQTT", set_mqtt),
-        ("UDP", configure_udp),
-        ("BootDelay", set_boot_delay),
-        ("ProductName", set_product_name),
-        ("Subscribe", subscribe_topic),
-        ("GetSubs", get_subs),
-        ("Unsubscribe", unsubscribe_topic),
-        ("SetWill", set_will),
-        ("GetWill", get_will),
-        ("Ping", configure_ping),
-        ("Reboot", reboot),
-    ]
+    ("Passcode", set_passcode, "Passcode should be set"),
+    ("SRID", set_srid, "srID = 123456789ABC"),
+    ("WiFi", configure_wifi, "SSID=Wifi and IP"),
+    ("SoftAP Config", configure_softap, "SoftAP configured"),
+    ("Server", set_server, "serverType=5"),
+    ("MQTT", set_mqtt, "serverType=2"),
+    ("MQTT Alive", set_mqtt_alive, "mqttSetAlive=60"),
+    ("Subscribe", subscribe_topic, "MQTT subscribe"),
+    ("GetSubs", get_subs, "Subs list"),
+    ("Unsubscribe", unsubscribe_topic, "MQTT unsubscribe"),
+    ("SetWill", set_will, "Will set"),
+    ("GetWill", get_will, "Will get"),
+    ("Publish", publish_topic, "Publish ok"),
+    ("GetPublish", get_publish, "Publish fetch"),
+    ("UDP", configure_udp, "UDP config"),
+    ("BootDelay", set_boot_delay, "bootDelay=5"),
+    ("ProductName", set_product_name, "productName"),
+    ("Ping", configure_ping, "Ping config"),
+    ("Reboot", reboot, "Device reboot"),
+    ("NTP", ntp_settings, "NTP response"),
+    ("NetworkType", set_network_type, "networkType=1"),
+    ("OTASecure", set_ota_secure, "otaSecure=1"),
+    ("IPType", configure_network_settings, "ipType=0"),
+    ("Sensor Scan Time", sensorscantime, "badCommand expected"),
+    ("UZID", set_uzid, "UZID set"),
+    ("RebootLog", get_reboot_log, "rebootLog fetch"),
+    ("GetAuth", get_auth, "Auth path"),
+    ("SetAuth", set_auth, "Auth set"),
+    ("PerformAuth", perform_auth, "Auth success"),
+    ("SoftAP Enable", softap_enable, "LED aqua"),
+    ("SoftAP Disable", softap_disable, "LED normal"),
+    ("BoardDetail", get_board_detail, "Board info"),
+    ("GetMaintenance", get_maintenance, "Maintenance get"),
+    ("SetMaintenance", set_maintenance, "Maintenance set"),
+    ("TouchFlow", touch_flow, "Touch test"),
+    ("NetworkReset", network_reset, "Network reset"),
+    ("FinalReset", final_reset, "Hard reset"),
+]
 
     results = []
 
-    for name, func in tests:
-        results.append(run_test(name, func))
+    for name, func, expected in tests:
+        print(f"\n▶ {name}")
+        start = time.time()
+
+        try:
+            success, obs = func()
+        except Exception as e:
+            success, obs = False, str(e)
+
+        total = round(time.time() - start, 2)
+        status = "PASS" if success else "FAIL"
+
+        print(f"{status} ({total}s)")
+        print(obs)
+
+        observed_full = f"{obs} | total_time={total}s"
+
+        # 🔹 LOGGING (ADDED, DOES NOT TOUCH CORE FLOW)
+        log_csv(name, expected, observed_full, status)
+        log_txt(name, expected, observed_full, status)
+
+        results.append({
+            "test_name": name,
+            "observed": observed_full,
+            "status": status,
+            "time": total
+        })
 
     print("\n==== SUMMARY ====")
     for r in results:
